@@ -1,0 +1,21 @@
+# Portal credentials are entered in the web app after each start and kept in memory only.
+# For a server install with a data directory on the host, use ./install.sh instead.
+services:
+  epp:
+    image: ${EPP_IMAGE:-ghcr.io/ralf31337/epp}:${EPP_VERSION:-latest}
+    build: .
+    container_name: epp
+    restart: unless-stopped
+    environment:
+      EPP_TIMEZONE: ${EPP_TIMEZONE:-Europe/Berlin}
+      EPP_PUBLIC_URL: ${EPP_PUBLIC_URL:-}
+    ports:
+      - "${EPP_PORT:-3081}:3081"
+    volumes:
+      - epp-data:/data
+    extra_hosts:
+      # Lets the container reach an Ollama running on the Docker host (needed on Linux).
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  epp-data:

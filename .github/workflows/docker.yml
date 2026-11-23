@@ -1,0 +1,126 @@
+name: Docker image
+
+# Every push to main publishes ghcr.io/<owner>/<repo>:edge.
+# When VERSION holds a version without a git tag yet, the run also publishes :<x.y> and :latest,
+# creates the tag v<x.y>, and a GitHub release. To release, bump VERSION (for example 0.2 -> 0.3).
+# Pull requests only build the image.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Test backend
+        run: |
+          pip install -e '.[dev]'
+          pytest -q
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Typecheck web app
+        working-directory: web
+        run: |
+          npm ci
+          npm run typecheck
+
+      - name: Read version
+        id: version
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            echo "::error file=VERSION::VERSION must look like x.y (for example 0.2), got '$version'"
+            exit 1
+          fi
+          release=false
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" && "$GITHUB_REF" == "refs/heads/main" ]] \
+            && ! git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            release=true
+          fi
+          if [[ "$release" == "true" ]]; then
+            app_version="$version"
+          else
+            app_version="$version-edge.${GITHUB_SHA::7}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.release }}
+            type=raw,value=latest,enable=${{ steps.version.outputs.release }}
+            type=sha,prefix=sha-,enable=${{ github.event_name != 'pull_request' }}
+            type=ref,event=pr
+          labels: |
+            org.opencontainers.image.title=Eltern-Portal Parser
+            org.opencontainers.image.version=${{ steps.version.outputs.app_version }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.app_version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Tag and release
+        if: steps.version.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+          gh release create "v$VERSION" --title "Eltern-Portal Parser $VERSION" --generate-notes \
+            --notes "Docker image: \`${IMAGE}:${VERSION}\`"

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Eltern-Portal</title>
+    <script>
+      // All URLs are relative, so a sub-path like /epp must end with a slash to resolve correctly.
+      if (!location.pathname.endsWith("/") && !/\.[a-z0-9]+$/i.test(location.pathname)) {
+        location.replace(location.pathname + "/" + location.search + location.hash);
+      }
+    </script>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect x='4' y='6' width='24' height='20' rx='4' fill='%234f6bed'/><path d='M6 9l10 8 10-8' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./src/main.tsx"></script>
+  </body>
+</html>
