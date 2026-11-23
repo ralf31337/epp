@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # Installs the Eltern-Portal parser as a Docker Compose service.
 #
-#   ./install.sh                      interactive
-#   ./install.sh -d /opt/epp -y       non-interactive with defaults
+#   curl -fsSL https://raw.githubusercontent.com/ralf31337/epp/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ralf31337/epp/main/install.sh | bash -s -- --dir /opt/epp -y
 #
 # Portal tenant, username and password are not asked here: enter them in the web app after
 # every start (they are kept in memory only).
 set -euo pipefail
 
-DIR="${HOME}/epp"
+# Everything runs inside main so bash has read the whole script before anything executes; when piped
+# from curl, a command reading stdin would otherwise swallow the rest of the script.
+main() {
+if [[ "$(id -u)" == 0 ]]; then DIR="/opt/epp"; else DIR="${HOME}/epp"; fi
 PORT="3081"
-IMAGE="ghcr.io/ralf31337/epp:latest"
+IMAGE="ghcr.io/ralf31337/epp"
+VERSION="latest"
 NAME="epp"
 OLLAMA_HOST="172.17.0.1"
 OLLAMA_PORT="11434"
@@ -21,14 +25,16 @@ GIVEN=" "
 
 usage() {
   cat <<EOF
-Usage: $0 [options]
+Usage: install.sh [options]
+       curl -fsSL https://raw.githubusercontent.com/ralf31337/epp/main/install.sh | bash -s -- [options]
 
   -d, --dir DIR          Installation directory (default: ${DIR})
   -p, --port PORT        Host port of the web app (default: ${PORT})
       --ollama-host HOST Ollama host for PDF parsing and analysis (default: ${OLLAMA_HOST})
       --ollama-port PORT Ollama port (default: ${OLLAMA_PORT})
       --public-url URL   Public URL behind a reverse proxy, e.g. https://example.org/epp (optional)
-      --image IMAGE      Docker image (default: ${IMAGE})
+      --version X.Y      Version to install: latest, edge or e.g. 0.2 (default: ${VERSION})
+      --image IMAGE      Docker image without tag (default: ${IMAGE})
       --name NAME        Container name (default: ${NAME})
       --timezone TZ      Time zone for schedule and calendar (default: ${TIMEZONE})
   -y, --yes              Do not ask, use defaults and given options
@@ -46,6 +52,7 @@ while [[ $# -gt 0 ]]; do
     --ollama-host) OLLAMA_HOST="${2:?}"; GIVEN+="ollama-host "; shift 2 ;;
     --ollama-port) OLLAMA_PORT="${2:?}"; GIVEN+="ollama-port "; shift 2 ;;
     --public-url) PUBLIC_URL="${2?}"; GIVEN+="public-url "; shift 2 ;;
+    --version) VERSION="${2:?}"; shift 2 ;;
     --image) IMAGE="${2:?}"; shift 2 ;;
     --name) NAME="${2:?}"; shift 2 ;;
     --timezone) TIMEZONE="${2:?}"; shift 2 ;;
@@ -107,6 +114,8 @@ ask public-url "Public URL behind a reverse proxy (empty = detect from proxy hea
 PUBLIC_URL="${PUBLIC_URL%/}"
 [[ -z "$PUBLIC_URL" || "$PUBLIC_URL" =~ ^https?://[^[:space:]]+$ ]] || die "public URL must start with http:// or https://"
 
+[[ "$VERSION" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid version: $VERSION"
+IMAGE="$IMAGE:$VERSION"
 [[ "$NAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "container name must be lowercase letters, digits, '-' or '_'"
 
 # The container runs as the owner of the data directory.
@@ -212,3 +221,6 @@ Next steps:
      memory only, so enter them again after every restart of the container.
   2. In Settings, enable PDF parsing and analysis and choose the Ollama models.
 EOF
+}
+
+main "$@"

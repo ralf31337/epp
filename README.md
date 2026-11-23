@@ -51,19 +51,17 @@ the login dialog again. Scheduled syncs are skipped until you log in.
 Requirements: a Linux host (or a Mac with Docker Desktop or Colima) with Docker and the Docker Compose
 plugin, and an Ollama instance (see [Ollama setup](#ollama-setup)).
 
-### Using the install script
+### Quick install
 
 ```bash
-git clone https://github.com/ralf31337/epp.git
-cd epp
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/ralf31337/epp/main/install.sh | bash
 ```
 
 The script asks for:
 
 | Question | Default |
 | --- | --- |
-| Installation directory | `~/epp` |
+| Installation directory | `/opt/epp` when run as root, otherwise `~/epp` |
 | Web app port | `3081` |
 | Ollama host and port | `172.17.0.1` and `11434` |
 | Public URL behind a reverse proxy | empty (auto-detect) |
@@ -73,14 +71,28 @@ It then creates `<dir>/data`, which holds all Markdown files, PDFs and settings.
 endpoint in the app. The container runs as the user who ran the script, so the files in `data/` belong
 to you.
 
-Non-interactive example:
+Options go after `bash -s --`. With `-y` the script asks nothing and uses the defaults for everything
+not given:
 
 ```bash
-./install.sh -y -d /opt/epp -p 3081 --ollama-host 172.17.0.1 --ollama-port 11434
+curl -fsSL https://raw.githubusercontent.com/ralf31337/epp/main/install.sh \
+  | sudo bash -s -- -y --dir /opt/epp --port 3081 --ollama-host 172.17.0.1 --ollama-port 11434
 ```
 
-Run `./install.sh --help` for all options (`--image`, `--name`, `--timezone`, `--public-url`). Running the
-script again updates an existing installation in place and keeps the data.
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `-d`, `--dir DIR` | `/opt/epp` (root), `~/epp` | Installation directory |
+| `-p`, `--port PORT` | `3081` | Port on the host |
+| `--ollama-host HOST` | `172.17.0.1` | Ollama host for PDF parsing and analysis |
+| `--ollama-port PORT` | `11434` | Ollama port |
+| `--public-url URL` | empty | Public URL behind a reverse proxy |
+| `--version X.Y` | `latest` | Version to install (`latest`, `edge`, or for example `0.2`) |
+| `--name NAME` | `epp` | Container and Compose project name |
+| `--timezone TZ` | `Europe/Berlin` | Time zone |
+| `-y`, `--yes` | off | Don't ask, use defaults and given options |
+
+Running the script again updates an existing installation in place and keeps the data. From a clone of
+the repository you can also run `./install.sh` directly with the same options.
 
 Manage the service from the installation directory:
 
