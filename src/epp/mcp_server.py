@@ -4,7 +4,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from epp import services, urls
-from epp.agenda import collect_events, daily_markdown, events_between
+from epp.agenda import daily_markdown, events_between
 from epp.storage import format_event
 from epp.sync import JobBusy, MissingCredentials
 
@@ -12,8 +12,9 @@ mcp = MCPServer(
     name="eltern-portal",
     title="Eltern-Portal",
     instructions=(
-        "Access to school letters (Elternbriefe) from the Eltern-Portal: letters with summaries, "
-        "attachment text, extracted appointments and a daily overview."
+        "Access to school letters (Elternbriefe, labelled #N) and notices from the Schwarzes Brett "
+        "(labelled ~N) from the Eltern-Portal: summaries, attachment text, extracted appointments and a "
+        "daily overview."
     ),
 )
 
@@ -22,10 +23,10 @@ def _letter_line(letter) -> str:
     date = letter.published_at.strftime("%d.%m.%Y") if letter.published_at else "-"
     summary = f" – {letter.analysis.summary}" if letter.analysis and letter.analysis.summary else ""
     files = f" [{len(letter.attachments)} Anhang/Anhänge]" if letter.attachments else ""
-    return f"- #{letter.number} (id {letter.id}, {date}) {letter.title}{files}{summary}"
+    return f"- {letter.label} (id {letter.id}, {date}) {letter.title}{files}{summary}"
 
 
-@mcp.tool(description="List the most recent school letters with id, date, title and summary.")
+@mcp.tool(description="List the most recent school letters and notices with id, date, title and summary.")
 def list_letters(limit: int = 20) -> str:
     letters = services.letters()[: max(1, limit)]
     return "\n".join(_letter_line(l) for l in letters) or "No letters synced yet."
@@ -47,8 +48,9 @@ def search_letters(query: str) -> str:
 
 @mcp.tool(
     description=(
-        "Daily overview with two sections: today and the rest of the current week. "
-        "On Saturday and Sunday it covers Monday and the coming week. Optional date as YYYY-MM-DD."
+        "Daily overview with three sections: today, the rest of the current week and next week, including "
+        "the school's Termine calendar. On Saturday and Sunday it covers Monday, the coming week and the "
+        "week after. Optional date as YYYY-MM-DD."
     )
 )
 def get_daily_summary(date: str | None = None) -> str:
@@ -56,13 +58,16 @@ def get_daily_summary(date: str | None = None) -> str:
     return daily_markdown(services.daily(day))
 
 
-@mcp.tool(description="List appointments and deadlines between two dates (YYYY-MM-DD, inclusive).")
+@mcp.tool(description=(
+    "List appointments and deadlines between two dates (YYYY-MM-DD, inclusive), from letters, notices "
+    "and the school's Termine calendar."
+))
 def list_events(start: str, end: str) -> str:
-    events = events_between(
-        collect_events(services.storage.load_state()), dt.date.fromisoformat(start), dt.date.fromisoformat(end)
-    )
-    return "\n".join(f"- {format_event(le.event)} (Elternbrief #{le.letter_number}, id {le.letter_id})"
-                     for le in events) or "No appointments in this range."
+    events = events_between(services.events(), dt.date.fromisoformat(start), dt.date.fromisoformat(end))
+    return "\n".join(
+        f"- {format_event(le.event)} ({le.letter_label}" + (f", id {le.letter_id}" if le.letter_id else "") + ")"
+        for le in events
+    ) or "No appointments in this range."
 
 
 @mcp.tool(description="Show sync status, last sync time and next scheduled run.")

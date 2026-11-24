@@ -231,6 +231,11 @@ export function App() {
             the same across restarts. Anyone who knows the link can read it.
           </p>
           <CopyField value={icsUrl(config.ics_token)} label="Calendar feed URL" />
+          <p className="muted small">
+            {status.portal_calendar.available
+              ? `Also includes ${status.portal_calendar.events} entries from the portal's "Schulaufgaben / Weitere Termine" calendar, fetched live and not stored.`
+              : "The portal's \"Schulaufgaben / Weitere Termine\" calendar is added after the next sync while logged in."}
+          </p>
         </Modal>
       )}
     </div>

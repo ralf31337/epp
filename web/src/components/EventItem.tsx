@@ -6,15 +6,16 @@ interface Props {
   withDate?: boolean;
   source?: string;
   onClick?: () => void;
+  clickTitle?: string;
 }
 
-export function EventItem({ event, withDate = true, source, onClick }: Props) {
+export function EventItem({ event, withDate = true, source, onClick, clickTitle = "Open letter" }: Props) {
   const deadline = event.title.toLowerCase().startsWith("frist");
   return (
     <li
       className={`event ${deadline ? "deadline" : ""} ${onClick ? "clickable" : ""}`}
       onClick={onClick}
-      title={onClick ? "Open letter" : undefined}
+      title={onClick ? clickTitle : undefined}
     >
       <span className="event-when">{formatEventWhen(event, withDate)}</span>
       <span className="event-body">

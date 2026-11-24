@@ -28,7 +28,7 @@ export function Sidebar({ letters, selected, onSelect }: Props) {
         <button className={`nav-item ${selected === "daily" ? "selected" : ""}`} onClick={() => onSelect("daily")}>
           Daily summary
         </button>
-        <input type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search letters…" />
+        <input type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search letters and notices…" />
       </div>
       <div className="sidebar-scroll">
         {filtered.length === 0 && <p className="muted small">{letters.length ? "No matching letters." : "No letters yet."}</p>}
@@ -42,12 +42,13 @@ export function Sidebar({ letters, selected, onSelect }: Props) {
             >
               <span className="letter-title">{letter.title}</span>
               <span className="letter-meta">
-                #{letter.number} · {formatDateTime(letter.published_at)}
+                {letter.label} · {formatDateTime(letter.published_at)}
               </span>
               <span className="chips">
+                {letter.kind === "notice" && <span className="chip">Schwarzes Brett</span>}
                 {letter.attachments.length > 0 && <span className="chip">📎 {letter.attachments.length}</span>}
                 {events > 0 && <span className="chip ok">📅 {events}</span>}
-                {!letter.acknowledged && <span className="chip warn">unconfirmed</span>}
+                {letter.kind === "letter" && !letter.acknowledged && <span className="chip warn">unconfirmed</span>}
                 {letter.analysis_error && <span className="chip danger">analysis failed</span>}
               </span>
             </button>

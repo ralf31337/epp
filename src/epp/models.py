@@ -1,6 +1,12 @@
 import datetime as dt
+from collections.abc import Iterable
+from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
+
+# "letter" = Elternbrief (#N, numbered by the portal), "notice" = Schwarzes Brett (~N, numbered by us)
+Kind = Literal["letter", "notice"]
+LABEL_PREFIX = {"letter": "#", "notice": "~"}
 
 
 class ParsedAttachment(BaseModel):
@@ -11,6 +17,7 @@ class ParsedAttachment(BaseModel):
 
 class ParsedLetter(BaseModel):
     id: str
+    kind: Kind = "letter"
     number: int
     title: str
     published_at: dt.datetime | None
@@ -54,6 +61,7 @@ class Analysis(BaseModel):
 
 class StoredLetter(BaseModel):
     id: str
+    kind: Kind = "letter"
     number: int
     title: str
     published_at: dt.datetime | None
@@ -68,6 +76,15 @@ class StoredLetter(BaseModel):
     analysis: Analysis | None = None
     analysis_error: str | None = None
     webhook_pending: bool = False
+
+    @computed_field
+    @property
+    def label(self) -> str:
+        return f"{LABEL_PREFIX[self.kind]}{self.number}"
+
+
+def newest_first(letters: Iterable[StoredLetter]) -> list[StoredLetter]:
+    return sorted(letters, key=lambda l: (l.published_at or l.first_seen_at, l.number), reverse=True)
 
 
 class State(BaseModel):

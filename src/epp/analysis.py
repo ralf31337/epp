@@ -29,6 +29,8 @@ RESPONSE_EXAMPLE = (
 
 def input_key(letter: StoredLetter, endpoint: OllamaEndpoint) -> str:
     parts = [PROMPT_VERSION, endpoint.model, letter.title, letter.description_sha256]
+    if letter.kind == "notice":
+        parts.append(letter.kind)
     parts += [a.text_key or a.sha256 for a in letter.attachments]
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
@@ -38,6 +40,8 @@ def build_prompt(letter: StoredLetter, attachment_texts: list[tuple[str, str]], 
     pub = f"{_WEEKDAYS[published.weekday()]}, {published:%Y-%m-%d %H:%M}" if published else "unbekannt"
     body = [f"Titel: {letter.title}", f"Veröffentlicht: {pub}", f"Klasse/n: {', '.join(letter.classes) or '-'}", "",
             "Text:", letter.description_md or "(leer)"]
+    if letter.kind == "notice":
+        body.insert(0, "Quelle: Schwarzes Brett (kurzer Aushang der Schule für alle Eltern, kein Elternbrief)")
     for name, text in attachment_texts:
         if text.strip():
             body += ["", f"Anhang «{name}»:", text]

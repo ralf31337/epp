@@ -5,7 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import quote
 
-from epp.models import Event, State, StoredAttachment, StoredLetter
+from epp.models import Event, State, StoredAttachment, StoredLetter, newest_first
 
 _UNSAFE_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
@@ -73,10 +73,8 @@ class Storage:
         return render_letter_md(letter, texts, heading_level, link)
 
     def render_all(self, state: State, base_url: str | None = None) -> str:
-        letters = sorted(
-            (l for l in state.letters.values() if not l.removed), key=lambda l: l.number, reverse=True
-        )
-        parts = ["# Elternbriefe", *(
+        letters = newest_first(l for l in state.letters.values() if not l.removed)
+        parts = ["# Elternbriefe & Schwarzes Brett", *(
             self.render(l, heading_level=2, base_url=base_url, link_prefix=f"letters/{l.id}/") for l in letters
         )]
         return "\n\n---\n\n".join(parts) + "\n"
@@ -113,14 +111,18 @@ def render_letter_md(
     h = "#" * heading_level
     date = letter.published_at.strftime("%d.%m.%Y %H:%M") if letter.published_at else "-"
     lines = [
-        f"{h} #{letter.number} {letter.title}",
+        f"{h} {letter.label} {letter.title}",
         "",
         f"- **ID:** {letter.id}",
+        f"- **Quelle:** {'Elternbrief' if letter.kind == 'letter' else 'Schwarzes Brett'}",
         f"- **Datum:** {date}",
-        f"- **Klasse/n:** {', '.join(letter.classes) or '-'}",
-        f"- **Empfang bestätigt:** {'ja' if letter.acknowledged else 'nein'}",
-        f"- **SHA-256 (Beschreibung):** `{letter.description_sha256}`",
     ]
+    if letter.kind == "letter":
+        lines += [
+            f"- **Klasse/n:** {', '.join(letter.classes) or '-'}",
+            f"- **Empfang bestätigt:** {'ja' if letter.acknowledged else 'nein'}",
+        ]
+    lines.append(f"- **SHA-256 (Beschreibung):** `{letter.description_sha256}`")
 
     if letter.analysis:
         a = letter.analysis

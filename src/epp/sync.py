@@ -10,9 +10,12 @@ from epp.appconfig import AppConfig, ConfigStore
 from epp.client import PortalClient
 from epp.config import Settings
 from epp.credentials import CredentialStore, Credentials
-from epp.models import ParsedLetter, State, StoredAttachment, StoredLetter, SyncResult
-from epp.parser import parse_elternbriefe
+from epp.models import Kind, ParsedLetter, State, StoredAttachment, StoredLetter, SyncResult, newest_first
+from epp.parser import parse_elternbriefe, parse_schwarzes_brett
+from epp.portal_calendar import portal_calendar
 from epp.storage import Storage, atomic_write, safe_filename
+
+SCHWARZES_BRETT_PATH = "/aktuelles/schwarzes_brett"
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +56,20 @@ def _unique_name(name: str, repo: str, used: set[str]) -> str:
     return file
 
 
+def _number_notices(state: State, notices: list[ParsedLetter]) -> None:
+    """Notices keep the number they got when first seen; new ones count up from the highest, oldest first."""
+    known = {l.id: l.number for l in state.letters.values() if l.kind == "notice"}
+    next_number = max(known.values(), default=0) + 1
+    # The page lists newest first; reversing keeps that order for notices with the same date.
+    fresh = [p for p in reversed(notices) if p.id not in known]
+    for p in sorted(fresh, key=lambda p: p.published_at or dt.datetime.max.replace(tzinfo=dt.timezone.utc)):
+        p.number = next_number
+        next_number += 1
+    for p in notices:
+        if p.id in known:
+            p.number = known[p.id]
+
+
 class Runner:
     def __init__(self, settings: Settings, storage: Storage, config: ConfigStore, credentials: CredentialStore):
         self.settings = settings
@@ -61,8 +78,20 @@ class Runner:
         self.credentials = credentials
         self.status = JobStatus()
         self._lock = threading.Lock()
+        self._sync_queued = False
 
     # Job control
+
+    def request_sync(self) -> bool:
+        """Starts a sync now, or queues it to run right after the current job. Returns True if started."""
+        try:
+            self.start("sync")
+            return True
+        except JobBusy:
+            with self._lock:
+                self._sync_queued = True
+            log.info("Sync queued until the running %s job finishes", self.status.kind)
+            return False
 
     def start(self, kind: str, letter_ids: list[str] | None = None) -> None:
         """Starts a job in a background thread."""
@@ -93,16 +122,17 @@ class Runner:
         try:
             cfg = self.config.get()
             state = self.storage.load_state()
-            initial_import = not state.letters
+            # The first import of each kind (e.g. notices after an upgrade) fires no webhooks.
+            known_kinds = {l.kind for l in state.letters.values()}
             if kind == "sync":
                 creds = self.credentials.get()
                 if creds is None:
                     raise MissingCredentials("Portal credentials are not set")
                 self._fetch(state, creds, result)
-                if not initial_import:
-                    for letter_id in result.new:
+                for letter_id in result.new:
+                    if state.letters[letter_id].kind in known_kinds:
                         state.letters[letter_id].webhook_pending = True
-                    self.storage.save_state(state)
+                self.storage.save_state(state)
             force = set(letter_ids or []) if kind == "reprocess" else set()
             self._process(state, cfg, result, only=force or None, force=bool(force))
             self.storage.write_combined_md(state)
@@ -120,6 +150,12 @@ class Runner:
                     update={"running": False, "phase": None, "finished_at": result.finished_at,
                             "last_result": result, "last_error": error}
                 )
+                queued, self._sync_queued = self._sync_queued, False
+            if queued and self.credentials.get() is not None:
+                try:
+                    self.start("sync")
+                except JobBusy:
+                    pass
         return result
 
     # Pipeline steps
@@ -130,74 +166,95 @@ class Runner:
         with PortalClient(self.settings, creds) as client:
             client.login()
             self._phase("Reading Elternbriefe")
-            parsed_letters = parse_elternbriefe(client.get_elternbriefe_html(), client.base_url)
+            letters = parse_elternbriefe(client.get_elternbriefe_html(), client.base_url)
+            self._store_all(state, client, "letter", letters, "Downloading attachments", now, result)
 
-            for n, parsed in enumerate(parsed_letters, 1):
-                self._phase(f"Downloading attachments ({n}/{len(parsed_letters)})")
-                prev = state.letters.get(parsed.id)
-                force = _needs_download(parsed, prev)
-                prev_files = {a.repo: a for a in prev.attachments} if prev else {}
+            # Optional sources: a failure is reported but does not fail the letter sync.
+            try:
+                self._phase("Reading Schwarzes Brett")
+                notices = parse_schwarzes_brett(client.get_page(SCHWARZES_BRETT_PATH), client.base_url)
+                _number_notices(state, notices)
+                self._store_all(state, client, "notice", notices, "Downloading notice attachments", now, result)
+            except Exception as e:
+                log.warning("Schwarzes Brett failed: %s", e)
+                result.errors.append(f"Schwarzes Brett: {e}")
 
-                used: set[str] = set()
-                attachments: list[StoredAttachment] = []
-                for att in parsed.attachments:
-                    existing = prev_files.get(att.repo)
-                    file = existing.file if existing else _unique_name(att.name, att.repo, used)
-                    used.add(file)
-                    path = self.storage.attachment_path(parsed.id, file)
-
-                    if existing and not force and path.exists():
-                        attachments.append(existing)
-                        continue
-
-                    content, _ = client.download(att.url)
-                    atomic_write(path, content)
-                    result.downloaded_files += 1
-                    sha = hashlib.sha256(content).hexdigest()
-                    keep_text = existing and existing.sha256 == sha
-                    attachments.append(
-                        existing.model_copy(update={"name": att.name, "size": len(content)})
-                        if keep_text
-                        else StoredAttachment(repo=att.repo, name=att.name, file=file, size=len(content), sha256=sha)
-                    )
-
-                changed = prev is None or force or prev.removed or prev.acknowledged != parsed.acknowledged
-                state.letters[parsed.id] = StoredLetter(
-                    **parsed.model_dump(exclude={"attachments"}),
-                    attachments=attachments,
-                    first_seen_at=prev.first_seen_at if prev else now,
-                    updated_at=now if changed else prev.updated_at,
-                    analysis=prev.analysis if prev else None,
-                    analysis_error=prev.analysis_error if prev else None,
-                    webhook_pending=prev.webhook_pending if prev else False,
-                )
-                self.storage.write_letter_md(state.letters[parsed.id])
-
-                if prev is None:
-                    result.new.append(parsed.id)
-                elif changed:
-                    result.updated.append(parsed.id)
-                else:
-                    result.unchanged.append(parsed.id)
-
-        present = {p.id for p in parsed_letters}
-        for letter_id, letter in state.letters.items():
-            if letter_id not in present and not letter.removed:
-                letter.removed = True
-                letter.updated_at = now
-                result.removed.append(letter_id)
+            try:
+                self._phase("Reading Termine calendar")
+                portal_calendar.discover(client)
+            except Exception as e:
+                log.warning("Termine calendar failed: %s", e)
+                result.errors.append(f"Termine: {e}")
 
         state.last_sync_at = _now()
         self.storage.save_state(state)
 
+    def _store_all(self, state: State, client: PortalClient, kind: Kind, parsed_items: list[ParsedLetter],
+                   phase: str, now: dt.datetime, result: SyncResult) -> None:
+        for n, parsed in enumerate(parsed_items, 1):
+            self._phase(f"{phase} ({n}/{len(parsed_items)})")
+            self._store(state, client, parsed, now, result)
+
+        present = {p.id for p in parsed_items}
+        for letter_id, letter in state.letters.items():
+            if letter.kind == kind and letter_id not in present and not letter.removed:
+                letter.removed = True
+                letter.updated_at = now
+                result.removed.append(letter_id)
+        self.storage.save_state(state)
+
+    def _store(self, state: State, client: PortalClient, parsed: ParsedLetter, now: dt.datetime,
+               result: SyncResult) -> None:
+        prev = state.letters.get(parsed.id)
+        force = _needs_download(parsed, prev)
+        prev_files = {a.repo: a for a in prev.attachments} if prev else {}
+
+        used: set[str] = set()
+        attachments: list[StoredAttachment] = []
+        for att in parsed.attachments:
+            existing = prev_files.get(att.repo)
+            file = existing.file if existing else _unique_name(att.name, att.repo, used)
+            used.add(file)
+            path = self.storage.attachment_path(parsed.id, file)
+
+            if existing and not force and path.exists():
+                attachments.append(existing)
+                continue
+
+            content, _ = client.download(att.url)
+            atomic_write(path, content)
+            result.downloaded_files += 1
+            sha = hashlib.sha256(content).hexdigest()
+            keep_text = existing and existing.sha256 == sha
+            attachments.append(
+                existing.model_copy(update={"name": att.name, "size": len(content)})
+                if keep_text
+                else StoredAttachment(repo=att.repo, name=att.name, file=file, size=len(content), sha256=sha)
+            )
+
+        changed = prev is None or force or prev.removed or prev.acknowledged != parsed.acknowledged
+        state.letters[parsed.id] = StoredLetter(
+            **parsed.model_dump(exclude={"attachments"}),
+            attachments=attachments,
+            first_seen_at=prev.first_seen_at if prev else now,
+            updated_at=now if changed else prev.updated_at,
+            analysis=prev.analysis if prev else None,
+            analysis_error=prev.analysis_error if prev else None,
+            webhook_pending=prev.webhook_pending if prev else False,
+        )
+        self.storage.write_letter_md(state.letters[parsed.id])
+
+        if prev is None:
+            result.new.append(parsed.id)
+        elif changed:
+            result.updated.append(parsed.id)
+        else:
+            result.unchanged.append(parsed.id)
+
     def _process(
         self, state: State, cfg: AppConfig, result: SyncResult, only: set[str] | None, force: bool
     ) -> None:
-        letters = sorted(
-            (l for l in state.letters.values() if not l.removed and (only is None or l.id in only)),
-            key=lambda l: l.number,
-            reverse=True,
-        )
+        letters = newest_first(l for l in state.letters.values() if not l.removed and (only is None or l.id in only))
         def text_key(att: StoredAttachment, method: str) -> str:
             return hashlib.sha256(f"{att.sha256}\n{method}".encode()).hexdigest()
 
@@ -243,7 +300,7 @@ class Runner:
 
     def _notify(self, state: State, cfg: AppConfig, result: SyncResult) -> None:
         """Sends pending new-letter webhooks; failed deliveries stay pending and are retried next sync."""
-        pending = sorted((l for l in state.letters.values() if l.webhook_pending), key=lambda l: l.number)
+        pending = newest_first(l for l in state.letters.values() if l.webhook_pending)[::-1]
         for letter in pending:
             if not cfg.webhook_url or letter.removed:
                 letter.webhook_pending = False
@@ -251,7 +308,7 @@ class Runner:
             self._phase(f"Sending webhook for «{letter.title}»")
             base = urls.base_url()
             try:
-                webhook.send(str(cfg.webhook_url), "letter.created",
+                webhook.send(str(cfg.webhook_url), f"{letter.kind}.created",
                              webhook.letter_payload(letter, self.storage.render(letter, base_url=base), base))
                 letter.webhook_pending = False
                 result.webhooks_sent += 1

@@ -29,7 +29,9 @@ export interface Analysis {
 
 export interface Letter {
   id: string;
+  kind: "letter" | "notice";
   number: number;
+  label: string;
   title: string;
   published_at: string | null;
   classes: string[];
@@ -69,6 +71,8 @@ export interface Status {
   };
   last_sync_at: string | null;
   letters: number;
+  notices: number;
+  portal_calendar: { available: boolean; events: number; fetched_at: string | null; error: string | null };
   analysed: number;
   schedule_cron: string;
   next_run: string | null;
@@ -95,11 +99,13 @@ export interface AppConfig {
 
 export interface LetterEvent {
   uid: string;
-  letter_id: string;
-  letter_number: number;
+  letter_id: string | null;
+  letter_number: number | null;
+  letter_label: string;
   letter_title: string;
+  url: string | null;
   event: CalendarEvent;
-  also_in: number[];
+  also_in: string[];
 }
 
 export interface DailyDay {
@@ -115,4 +121,8 @@ export interface DailySummary {
   rest_start: string | null;
   rest_end: string | null;
   rest: DailyDay[];
+  next_label: string;
+  next_start: string;
+  next_end: string;
+  next: DailyDay[];
 }

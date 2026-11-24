@@ -68,9 +68,15 @@ export function LetterView({ letter, busy, onReprocess }: Props) {
         <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
           <h2>{letter.title}</h2>
           <span className="letter-meta">
-            #{letter.number} · {formatDateTime(letter.published_at)}
+            {letter.label} · {formatDateTime(letter.published_at)}
             {letter.classes.length > 0 && <> · Klasse/n {letter.classes.join(", ")}</>}
-            {letter.acknowledged ? <span className="chip ok">receipt confirmed</span> : <span className="chip warn">unconfirmed</span>}
+            {letter.kind === "notice" ? (
+              <span className="chip">Schwarzes Brett</span>
+            ) : letter.acknowledged ? (
+              <span className="chip ok">receipt confirmed</span>
+            ) : (
+              <span className="chip warn">unconfirmed</span>
+            )}
           </span>
         </div>
         <span className="spacer" />
@@ -119,7 +125,7 @@ export function LetterView({ letter, busy, onReprocess }: Props) {
       )}
 
       <section className="card">
-        <h3>Letter</h3>
+        <h3>{letter.kind === "notice" ? "Notice" : "Letter"}</h3>
         {letter.description_md ? <Markdown text={letter.description_md} /> : <span className="muted">No text.</span>}
       </section>
 

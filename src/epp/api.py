@@ -10,12 +10,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
 from epp import services, urls, webhook
-from epp.agenda import DailySummary, LetterEvent, build_ics, collect_events, daily_markdown, events_between
+from epp.agenda import DailySummary, LetterEvent, build_ics, daily_markdown, events_between
 from epp.appconfig import AppConfig, AppConfigUpdate, OllamaEndpoint, next_runs, validate_cron
 from epp.client import AuthError, PortalClient
 from epp.credentials import Credentials, credential_store
 from epp.models import StoredLetter
 from epp.ollama import OllamaError, list_models
+from epp.portal_calendar import portal_calendar
 from epp.sync import JobBusy, MissingCredentials
 
 log = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ async def lifespan(_: FastAPI):
     task.cancel()
 
 
-app = FastAPI(title="Eltern-Portal Parser", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Eltern-Portal Parser", version="0.3.0", lifespan=lifespan)
 app.add_middleware(urls.ForwardedMiddleware)
 
 
@@ -100,16 +101,14 @@ async def set_credentials(body: CredentialsIn) -> dict:
         raise HTTPException(502, f"Could not reach {creds.tenant}.{settings.base_domain}: {e}")
 
     credential_store.set(creds)
-    try:
-        runner.start("sync")
-    except JobBusy:
-        pass
+    runner.request_sync()
     return services.status()["credentials"]
 
 
 @app.delete("/api/credentials")
 def clear_credentials() -> dict:
     credential_store.clear()
+    portal_calendar.clear()
     return services.status()["credentials"]
 
 
@@ -241,7 +240,7 @@ def get_attachment_text(letter_id: str, repo: str) -> PlainTextResponse:
 def list_events(
     start: dt.date | None = Query(None, alias="from"), end: dt.date | None = Query(None, alias="to")
 ) -> list[LetterEvent]:
-    events = collect_events(storage.load_state())
+    events = services.events()
     if start or end:
         events = events_between(events, start or dt.date.min, end or dt.date.max)
     return events
@@ -263,7 +262,7 @@ def ics_feed(token: str) -> Response:
         raise HTTPException(404, "not found")
     base = urls.base_url()
     letter_url = f"{base}/#/letters/{{id}}" if base else None
-    body = build_ics(storage.load_state(), settings.tz, letter_url)
+    body = build_ics(storage.load_state(), settings.tz, letter_url, extra=portal_calendar.components())
     return Response(body, media_type="text/calendar; charset=utf-8",
                     headers={"Content-Disposition": 'inline; filename="eltern-portal.ics"'})
 

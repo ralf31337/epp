@@ -1,12 +1,14 @@
-"""Events from analysed letters: ICS feed and daily summary."""
+"""Events from analysed letters and the portal calendar: ICS feed and daily summary."""
 
 import datetime as dt
 import hashlib
 import re
+from collections.abc import Iterable
 from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 
 from icalendar import Calendar, Event as IcsEvent
+from icalendar.cal import Component
 from pydantic import BaseModel
 
 from epp.models import Event, State, StoredLetter
@@ -16,12 +18,16 @@ _WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
 
 
 class LetterEvent(BaseModel):
+    """An event with its source: a letter/notice, or (letter_id None) the portal's Termine calendar."""
+
     uid: str
-    letter_id: str
-    letter_number: int
+    letter_id: str | None = None
+    letter_number: int | None = None
+    letter_label: str
     letter_title: str
+    url: str | None = None
     event: Event
-    also_in: list[int] = []
+    also_in: list[str] = []
 
     @property
     def last_day(self) -> dt.date:
@@ -46,7 +52,7 @@ def same_event(a: Event, b: Event) -> bool:
 
 def collect_events(state: State) -> list[LetterEvent]:
     """All events, with duplicates across letters merged into the most specific letter (fewest events)."""
-    candidates: list[tuple[int, LetterEvent]] = []
+    candidates: list[tuple[tuple[int, float, int], LetterEvent]] = []
     for letter in state.letters.values():
         if letter.removed or not letter.analysis:
             continue
@@ -56,19 +62,37 @@ def collect_events(state: State) -> list[LetterEvent]:
                 uid=f"{hashlib.sha1(raw.encode()).hexdigest()[:20]}@epp",
                 letter_id=letter.id,
                 letter_number=letter.number,
+                letter_label=letter.label,
                 letter_title=letter.title,
                 event=e,
             )
-            candidates.append((len(letter.analysis.events), le))
+            published = (letter.published_at or letter.first_seen_at).timestamp()
+            candidates.append(((len(letter.analysis.events), -published, -letter.number), le))
 
     out: list[LetterEvent] = []
-    for _, le in sorted(candidates, key=lambda c: (c[0], -c[1].letter_number)):
+    for _, le in sorted(candidates, key=lambda c: c[0]):
         dup = next((kept for kept in out if kept.letter_id != le.letter_id and same_event(kept.event, le.event)), None)
         if dup:
-            dup.also_in.append(le.letter_number)
+            dup.also_in.append(le.letter_label)
         else:
             out.append(le)
-    return sorted(out, key=lambda le: (le.event.date, le.event.start_time or "", le.event.title))
+    return sorted(out, key=_event_order)
+
+
+def _event_order(le: LetterEvent) -> tuple:
+    return le.event.date, le.event.start_time or "", le.event.title
+
+
+def merge_events(letter_events: list[LetterEvent], calendar_events: Iterable[LetterEvent]) -> list[LetterEvent]:
+    """Adds calendar events; one that a letter already mentions is noted on the letter's event instead."""
+    out = list(letter_events)
+    for ce in calendar_events:
+        dup = next((le for le in out if le.letter_id and same_event(le.event, ce.event)), None)
+        if dup:
+            dup.also_in.append(ce.letter_label)
+        else:
+            out.append(ce)
+    return sorted(out, key=_event_order)
 
 
 def events_between(events: list[LetterEvent], start: dt.date, end: dt.date) -> list[LetterEvent]:
@@ -80,7 +104,9 @@ def _parse_time(value: str) -> dt.time:
     return dt.time(int(h), int(m))
 
 
-def build_ics(state: State, tz: ZoneInfo, letter_url: str | None = None) -> bytes:
+def build_ics(state: State, tz: ZoneInfo, letter_url: str | None = None,
+              extra: Iterable[Component] = ()) -> bytes:
+    """extra: ready-made components (e.g. the portal's own calendar) appended as they are."""
     cal = Calendar()
     cal.add("prodid", "-//epp//Eltern-Portal Parser//DE")
     cal.add("version", "2.0")
@@ -113,7 +139,8 @@ def build_ics(state: State, tz: ZoneInfo, letter_url: str | None = None) -> byte
             ev.add("location", e.location)
 
         letter = letters[le.letter_id]
-        desc = [e.details or "", f"Elternbrief #{le.letter_number}: {le.letter_title}"]
+        source = "Elternbrief" if letter.kind == "letter" else "Schwarzes Brett"
+        desc = [e.details or "", f"{source} {le.letter_label}: {le.letter_title}"]
         if letter.analysis and letter.analysis.summary:
             desc += ["", letter.analysis.summary]
         if letter_url:
@@ -122,6 +149,8 @@ def build_ics(state: State, tz: ZoneInfo, letter_url: str | None = None) -> byte
             ev.add("url", link)
         ev.add("description", "\n".join(desc).strip())
         cal.add_component(ev)
+    for comp in extra:
+        cal.add_component(comp)
     return cal.to_ical()
 
 
@@ -139,6 +168,10 @@ class DailySummary(BaseModel):
     rest_start: dt.date | None
     rest_end: dt.date | None
     rest: list[DailyDay]
+    next_label: str
+    next_start: dt.date
+    next_end: dt.date
+    next: list[DailyDay]
 
 
 def daily_window(today: dt.date) -> tuple[dt.date, bool, dt.date]:
@@ -153,41 +186,48 @@ def _day(date: dt.date, events: list[LetterEvent]) -> DailyDay:
     return DailyDay(date=date, weekday=_WEEKDAYS[date.weekday()], events=events_between(events, date, date))
 
 
-def daily_summary(state: State, today: dt.date, tz: ZoneInfo) -> DailySummary:
-    events = collect_events(state)
+def _days(start: dt.date, end: dt.date, events: list[LetterEvent]) -> list[DailyDay]:
+    return [_day(start + dt.timedelta(days=i), events) for i in range((end - start).days + 1)]
+
+
+def daily_summary(events: list[LetterEvent], today: dt.date, tz: ZoneInfo) -> DailySummary:
+    """Today, the rest of this week and next week; on weekends shifted to Monday, its week and the week after."""
     focus, shifted, week_end = daily_window(today)
-    rest_days = []
-    d = focus + dt.timedelta(days=1)
-    while d <= week_end:
-        rest_days.append(_day(d, events))
-        d += dt.timedelta(days=1)
+    rest_days = _days(focus + dt.timedelta(days=1), week_end, events)
+    next_start, next_end = week_end + dt.timedelta(days=1), week_end + dt.timedelta(days=7)
     return DailySummary(
         generated_at=dt.datetime.now(tz),
         focus_label="Monday" if shifted else "Today",
         focus=_day(focus, events),
-        rest_label="Coming week" if shifted else "Rest of the week",
+        rest_label="Coming week" if shifted else "This week",
         rest_start=rest_days[0].date if rest_days else None,
         rest_end=week_end if rest_days else None,
         rest=rest_days,
+        next_label="Week after" if shifted else "Next week",
+        next_start=next_start,
+        next_end=next_end,
+        next=_days(next_start, next_end, events),
     )
 
 
 def daily_markdown(summary: DailySummary) -> str:
     def entries(day: DailyDay) -> list[str]:
         def source(le: LetterEvent) -> str:
-            return ", ".join(f"#{n}" for n in [le.letter_number, *le.also_in])
+            return ", ".join([le.letter_label, *le.also_in])
 
-        return [f"- {format_event(le.event)} _(letter {source(le)})_" for le in day.events]
+        return [f"- {format_event(le.event)} _({source(le)})_" for le in day.events]
+
+    def week(label: str, days: list[DailyDay], start: dt.date | None, end: dt.date | None) -> list[str]:
+        span = f" ({start:%d.%m.} – {end:%d.%m.%Y})" if start and end else ""
+        out = ["", f"## {label}{span}", ""]
+        busy = [d for d in days if d.events]
+        for day in busy:
+            out += [f"### {day.weekday}, {day.date:%d.%m.%Y}", "", *entries(day), ""]
+        return out + ([] if busy else ["_No appointments_"])
 
     f = summary.focus
     lines = ["# Daily summary", "", f"## {summary.focus_label} – {f.weekday}, {f.date:%d.%m.%Y}", ""]
     lines += entries(f) or ["_No appointments_"]
-    lines += ["", f"## {summary.rest_label}", ""]
-    any_rest = False
-    for day in summary.rest:
-        if day.events:
-            any_rest = True
-            lines += [f"### {day.weekday}, {day.date:%d.%m.%Y}", "", *entries(day), ""]
-    if not any_rest:
-        lines.append("_No appointments_")
+    lines += week(summary.rest_label, summary.rest, summary.rest_start, summary.rest_end)
+    lines += week(summary.next_label, summary.next, summary.next_start, summary.next_end)
     return "\n".join(lines).rstrip() + "\n"

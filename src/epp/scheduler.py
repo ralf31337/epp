@@ -4,7 +4,7 @@ import logging
 
 from epp.appconfig import ConfigStore, next_runs
 from epp.config import Settings
-from epp.sync import JobBusy, Runner
+from epp.sync import Runner
 
 log = logging.getLogger(__name__)
 
@@ -39,9 +39,5 @@ class Scheduler:
             self.last_skip_reason = "Skipped scheduled sync: credentials not entered since the last restart"
             log.warning(self.last_skip_reason)
             return
-        try:
-            self.runner.start("sync")
-            self.last_skip_reason = None
-        except JobBusy as e:
-            self.last_skip_reason = f"Skipped scheduled sync: {e}"
-            log.warning(self.last_skip_reason)
+        self.runner.request_sync()
+        self.last_skip_reason = None

@@ -6,12 +6,19 @@ something you can actually work with:
 
 - **Markdown archive** of every letter (headline, description, attachments, extracted PDF text), kept on a
   local volume. A SHA-256 of each description detects changed letters and triggers a re-download.
+- **Schwarzes Brett** notices (current and archived) are imported the same way and listed next to the
+  letters. The portal doesn't number them, so they're labelled `~1`, `~2`, … in the order they were
+  posted; a number never changes or gets reused.
 - **Summaries and appointments** extracted by a local LLM via [Ollama](https://ollama.com): the essential
   facts of each letter plus all dates, deadlines and events.
-- **Daily summary** with two sections: *today* and *rest of the week*. On Saturday and Sunday it shows
-  Monday and the coming week instead.
+- **Daily summary** with three sections: *today*, *this week* and *next week*. On Saturday and Sunday it
+  shows Monday, the coming week and the week after instead. It includes the portal's Termine calendar;
+  an appointment that a letter also mentions is shown once, with both sources.
 - **ICS calendar feed** with all extracted appointments, to subscribe to from any calendar app. The URL
-  contains a random token that stays stable across restarts.
+  contains a random token that stays stable across restarts. It also includes the portal's own
+  *Schulaufgaben / Weitere Termine* calendar: its feed URL is looked up during each sync, and the events
+  are fetched live (refreshed at most every 15 minutes) and never written to disk. Each of these events
+  links back to the portal's Termine page. After a restart they're missing until the next sync.
 - **Web app** to browse and search letters, read summaries and configure everything.
 - **REST API** (OpenAPI docs at `/docs`) and an **MCP server** (`/mcp`) so AI assistants can query your
   letters.
@@ -260,9 +267,10 @@ and input. Changing a model or mode only reprocesses what is affected. **Reproce
     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
   ```
 - **ICS:** `http://<host>:3081/ics/<token>.ics`. Copy the URL from the web app.
-- **Webhook:** a `POST` with JSON `{"event": "letter.created", "sent_at": ..., "data": {...}}`. `data`
-  contains the letter's title, date, classes, summary, key facts, events, Markdown and links to the
-  letter and its attachments. Failed deliveries are retried on the next sync. The settings page can send
+- **Webhook:** a `POST` with JSON `{"event": "letter.created", "sent_at": ..., "data": {...}}`, or
+  `notice.created` for a new Schwarzes Brett notice. `data` contains the kind, label (`#N` or `~N`),
+  title, date, classes, summary, key facts, events, Markdown and links to the letter and its
+  attachments. Failed deliveries are retried on the next sync. The settings page can send
   a `test` event.
 
 ## Development

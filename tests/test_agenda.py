@@ -2,11 +2,13 @@ import datetime as dt
 from zoneinfo import ZoneInfo
 
 import pytest
+from icalendar import Calendar
 
-from epp.agenda import build_ics, collect_events, daily_summary, daily_window
+from epp.agenda import build_ics, collect_events, daily_markdown, daily_summary, daily_window, merge_events
 from epp.analysis import parse_events, time_in_text
 from epp.appconfig import DEFAULT_CRON, next_runs, validate_cron
 from epp.models import Analysis, Event, State, StoredLetter
+from epp.portal_calendar import SOURCE_NOTE, _details, annotate, to_events
 
 TZ = ZoneInfo("Europe/Berlin")
 
@@ -40,15 +42,25 @@ def test_daily_summary_sections():
         Event(title="Heute", date=dt.date(2026, 11, 30), start_time="19:00"),
         Event(title="Später", date=dt.date(2026, 12, 2)),
         Event(title="Danach", date=dt.date(2026, 12, 8)),
+        Event(title="Viel später", date=dt.date(2026, 12, 14)),
         Event(title="Mehrtägig", date=dt.date(2026, 11, 29), end_date=dt.date(2026, 12, 1)),
     ])})
-    s = daily_summary(state, dt.date(2026, 11, 28), TZ)
+    s = daily_summary(collect_events(state), dt.date(2026, 11, 28), TZ)
     assert s.focus_label == "Monday"
     assert [le.event.title for le in s.focus.events] == ["Mehrtägig", "Heute"]
     rest = {d.date.isoformat(): [le.event.title for le in d.events] for d in s.rest}
     assert rest["2026-12-01"] == ["Mehrtägig"]
     assert rest["2026-12-02"] == ["Später"]
     assert "Danach" not in str(rest)
+    assert (s.next_label, s.next_start, s.next_end) == ("Week after", dt.date(2026, 12, 7), dt.date(2026, 12, 13))
+    assert [(d.date.day, le.event.title) for d in s.next for le in d.events] == [(8, "Danach")]
+
+    weekday = daily_summary(collect_events(state), dt.date(2026, 11, 25), TZ)
+    assert (weekday.focus_label, weekday.rest_label, weekday.next_label) == ("Today", "This week", "Next week")
+    assert (weekday.next_start, weekday.next_end) == (dt.date(2026, 11, 30), dt.date(2026, 12, 6))
+    md = daily_markdown(weekday)
+    assert "## This week (26.11. – 29.11.2026)" in md
+    assert "## Next week (30.11. – 06.12.2026)" in md
 
 
 def test_cron_validation():
@@ -98,10 +110,10 @@ def test_duplicates_across_letters_are_merged():
     books = _letter([Event(title="Büchervorstellung", date=dt.date(2026, 11, 27), start_time="19:00")])
     books.id, books.number = "16", 16
     events = collect_events(State(letters={"15": reminder, "16": books, "17": invitation}))
-    assert [(le.letter_number, le.event.title, le.also_in) for le in events] == [
-        (17, "Herbst-Kaleidoskop 2026", [15]),
-        (16, "Büchervorstellung", [15]),
-        (15, "Weihnachtsferien", []),
+    assert [(le.letter_label, le.event.title, le.also_in) for le in events] == [
+        ("#17", "Herbst-Kaleidoskop 2026", ["#15"]),
+        ("#16", "Büchervorstellung", ["#15"]),
+        ("#15", "Weihnachtsferien", []),
     ]
 
 
@@ -115,3 +127,94 @@ def test_ics_contains_events():
     assert "DTSTART:20261125T180000Z" in ics
     assert "DTSTART;VALUE=DATE:20261201" in ics
     assert "DTEND;VALUE=DATE:20261203" in ics
+    assert "Elternbrief #1: Brief" in ics
+
+
+PORTAL_ICS = b"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//portal//EN
+BEGIN:VTIMEZONE
+TZID:Europe/Berlin
+BEGIN:STANDARD
+DTSTART:19701025T030000
+TZOFFSETFROM:+0200
+TZOFFSETTO:+0100
+END:STANDARD
+END:VTIMEZONE
+BEGIN:VEVENT
+UID:abc@portal
+DTSTART;TZID=Europe/Berlin:20261201T080000
+DTEND;TZID=Europe/Berlin:20261201T090000
+SUMMARY:Schulaufgabe Mathematik
+DESCRIPTION:Klasse 5D
+END:VEVENT
+BEGIN:VEVENT
+DTSTART;VALUE=DATE:20261223
+SUMMARY:Weihnachtsferien
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+def test_portal_events_are_merged_with_source():
+    source = "https://tenant.eltern-portal.org/service/termine"
+    ics = build_ics(State(), TZ, None, extra=annotate(PORTAL_ICS, source))
+    cal = Calendar.from_ical(ics)
+    events = {str(e["summary"]): e for e in cal.walk("VEVENT")}
+    assert len(cal.walk("VTIMEZONE")) == 1
+    exam = events["Schulaufgabe Mathematik"]
+    assert str(exam["uid"]) == "portal-abc@portal"
+    assert str(exam["description"]) == f"Klasse 5D\n\n{SOURCE_NOTE}\n{source}"
+    assert str(exam["url"]) == source
+    holidays = events["Weihnachtsferien"]
+    assert str(holidays["uid"]).startswith("portal-")
+    assert str(holidays["description"]) == f"{SOURCE_NOTE}\n{source}"
+
+
+MULTI_DAY_ICS = b"""BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:trip
+DTSTART:20261207T230000Z
+DTEND:20261210T230000Z
+SUMMARY:Skilager
+END:VEVENT
+BEGIN:VEVENT
+UID:break
+DTSTART;VALUE=DATE:20261223
+DTEND;VALUE=DATE:20270109
+SUMMARY:Weihnachtsferien
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+def test_portal_feed_as_daily_events():
+    source = "https://tenant.eltern-portal.org/service/termine"
+    exam, holidays = to_events(PORTAL_ICS, source, TZ)
+    assert (exam.letter_id, exam.letter_label, exam.url) == (None, "Termine", source)
+    assert (exam.event.date, exam.event.start_time, exam.event.end_time) == (dt.date(2026, 12, 1), "08:00", "09:00")
+    assert exam.event.details == "Klasse 5D"
+    assert (holidays.event.date, holidays.event.start_time, holidays.event.end_date) == (dt.date(2026, 12, 23), None, None)
+
+    trip, long_break = to_events(MULTI_DAY_ICS, source, TZ)
+    # Midnight local time on both ends: an all-day trip from Dec 8 to Dec 10.
+    assert (trip.event.date, trip.event.start_time, trip.event.end_date) == (dt.date(2026, 12, 8), None, dt.date(2026, 12, 10))
+    assert (long_break.event.date, long_break.event.end_date) == (dt.date(2026, 12, 23), dt.date(2027, 1, 8))
+
+
+def test_portal_descriptions_drop_repeated_title_and_generic_calendar():
+    assert _details("Sommerferien\n\nKalender: Kalender", "Sommerferien") is None
+    assert _details("Mathematik\n\nKalender: Schulaufgabe", "Mathematik") == "Schulaufgabe"
+    assert _details("Bitte Turnzeug mitbringen\n\nKalender: Kalender", "Wandertag") == "Bitte Turnzeug mitbringen"
+    assert _details(None, "x") is None
+
+
+def test_portal_events_merge_into_matching_letter_events():
+    letter = _letter([Event(title="Beginn der Weihnachtsferien", date=dt.date(2026, 12, 23))])
+    portal = to_events(PORTAL_ICS, "https://x/service/termine", TZ)
+    merged = merge_events(collect_events(State(letters={"1": letter})), portal)
+    assert [(le.letter_label, le.event.title, le.also_in) for le in merged] == [
+        ("Termine", "Schulaufgabe Mathematik", []),
+        ("#1", "Beginn der Weihnachtsferien", ["Termine"]),
+    ]

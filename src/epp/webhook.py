@@ -15,7 +15,9 @@ def letter_payload(letter: StoredLetter, markdown: str, base_url: str | None = N
     api = f"{base_url}/api/letters/{quote(letter.id)}" if base_url else None
     return {
         "id": letter.id,
+        "kind": letter.kind,
         "number": letter.number,
+        "label": letter.label,
         "title": letter.title,
         "published_at": letter.published_at.isoformat() if letter.published_at else None,
         "classes": letter.classes,
