@@ -251,6 +251,14 @@ and input. Changing a model or mode only reprocesses what is affected. **Reproce
   - `/api/sync`, `/api/status`
 - **MCP:** a Streamable HTTP endpoint at `http://<host>:3081/mcp` with the tools `list_letters`,
   `get_letter`, `search_letters`, `get_daily_summary`, `list_events`, `get_status` and `trigger_sync`.
+  It's stateless and only accepts `POST`; a plain `GET` (e.g. opening it in a browser) returns `405`.
+  Quick test:
+
+  ```bash
+  curl -X POST http://<host>:3081/mcp -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+  ```
 - **ICS:** `http://<host>:3081/ics/<token>.ics`. Copy the URL from the web app.
 - **Webhook:** a `POST` with JSON `{"event": "letter.created", "sent_at": ..., "data": {...}}`. `data`
   contains the letter's title, date, classes, summary, key facts, events, Markdown and links to the

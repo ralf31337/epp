@@ -5,7 +5,7 @@ import mimetypes
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
@@ -266,6 +266,25 @@ def ics_feed(token: str) -> Response:
     body = build_ics(storage.load_state(), settings.tz, letter_url)
     return Response(body, media_type="text/calendar; charset=utf-8",
                     headers={"Content-Disposition": 'inline; filename="eltern-portal.ics"'})
+
+
+@app.get("/mcp", include_in_schema=False)
+def mcp_get() -> JSONResponse:
+    # The server is stateless and never pushes messages, so instead of an SSE stream that stays open
+    # forever, answer GET with 405 as the Streamable HTTP spec allows.
+    return JSONResponse(
+        {
+            "error": "MCP endpoint: send JSON-RPC requests with POST",
+            "transport": "streamable-http",
+            "example": (
+                "curl -X POST <this-url> -H 'Content-Type: application/json' "
+                "-H 'Accept: application/json, text/event-stream' "
+                "-d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}'"
+            ),
+        },
+        status_code=405,
+        headers={"Allow": "POST"},
+    )
 
 
 app.router.routes.extend(r for r in _mcp_app.routes)
